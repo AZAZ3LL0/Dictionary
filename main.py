@@ -1,151 +1,86 @@
-import logging
-import asyncio
-import asyncpg
-from aiogram import Bot, types
-from aiogram.dispatcher import Dispatcher
-from aiogram.types import ParseMode
-from aiogram.utils import executor
+import telebot
+from telebot import types
+import openai
+import json
 
-# Установка логгера
-logging.basicConfig(level=logging.INFO)
+token_gpt = ''
+token = ''
 
-# Инициализация бота и диспетчера
-bot = Bot(token="")
-dp = Dispatcher(bot)
+bot = telebot.TeleBot(token)
 
-
-# Подключение к базе данных
-async def create_pool():
-    return await asyncpg.create_pool(
-        user="samat",
-        password="123",
-        database="dictionary",
-        host="localhost"
-    )
+termins = open("termins.txt", "r", encoding="utf-8")
+termins = termins.readlines()
+termins = [i.split(" : ") for i in termins]
 
 
-loop = asyncio.get_event_loop()
-pool = loop.run_until_complete(create_pool())
+class Copilot:
+
+    def clear_text(self, text):
+        a = text.replace("\n", " ")
+        b = a.split()
+        c = " ".join(b)
+
+        return c
+
+    def get_answer(self, question):
+        prompt = question
+
+        openai.api_key = token_gpt
+        response = openai.Completion.create(
+            engine="text-davinci-003",
+            prompt=prompt,
+            max_tokens=512,
+            temperature=0.5,
+        )
+
+        json_object = response
+
+        # Convert the JSON object to a JSON string
+        json_string = json.dumps(json_object)
+
+        # Parse the JSON string using json.loads()
+        parsed_json = json.loads(json_string)
+
+        text = parsed_json['choices'][0]['text']
+        cleared_text = self.clear_text(text)
+
+        return cleared_text
 
 
-# Функция для добавления слова в базу данных
-async def add_word(word, definition):
-    async with pool.acquire() as connection:
-        await connection.execute("INSERT INTO words (word, definition) VALUES ($1, $2)", word, definition)
+copilot = Copilot()
 
 
-# Функция для поиска слова в базе данных
-async def find_word(word):
-    async with pool.acquire() as connection:
-        row = await connection.fetchrow("SELECT * FROM words WHERE word = $1", word)
-        if row:
-            return row["definition"]
-        else:
-            return None
+@bot.message_handler(commands=['start'])  # создаем команду
+def start(message):
+    markup = types.InlineKeyboardMarkup()
+    bot.send_message(message.chat.id,
+                     "Привет, {0.first_name}! Введи термин, который хочешь узнать:".format(message.from_user),
+                     reply_markup=markup)
 
 
-# Функция для получения списка всех слов в базе данных
-async def get_all_words():
-    async with pool.acquire() as connection:
-        rows = await connection.fetch("SELECT * FROM words")
-        return [row["word"] for row in rows]
+@bot.message_handler(commands=['all'])  # создаем команду
+def write_all_terms(message):
+    markup = types.InlineKeyboardMarkup()
+    a = ""
+    for termin in termins:
+        a += termin[0] + ";" + "\n"
+    bot.send_message(message.chat.id, "Вот список терминов:\n\n" + a, reply_markup=markup)
 
 
-# Функция для удаления слова из базы данных
-async def delete_word(word):
-    async with pool.acquire() as connection:
-        result = await connection.execute("DELETE FROM words WHERE word = $1", word)
-        return result.split()[1] == "1"
+@bot.message_handler(func=lambda message: True)
+def echo_all(message):
+    flag = False
+    for ticket in termins:
+        if ticket[0].lower().strip() == message.text.lower().strip():
+            bot.send_message(message.chat.id, ticket[0] + " - " + ticket[1])
+            flag = True
+    if not flag:
+        print(message.text)
+        opred = copilot.get_answer("Краткое определение " + message.text)
+        bot.send_message(message.chat.id, opred)
+        file = open("termins.txt", 'a', encoding="utf-8")
+        file.write("\n" + " : ".join([message.text, opred]))
+        file.close()
 
 
-# Обработчик команды /start
-@dp.message_handler(commands=["start"])
-async def cmd_start(message: types.Message):
-    await message.answer("Привет! Я бот-словарь. Введите /help для получения списка доступных команд.")
-
-
-# Обработчик команды /help
-@dp.message_handler(commands=["help"])
-async def cmd_help(message: types.Message):
-    help_text = "Доступные команды:\n\n" \
-                "/add - добавить слово и его определение\n" \
-                "/find - найти определение слова\n" \
-                "/all - показать все слова в словаре"
-
-    await message.answer(help_text)
-
-
-# Обработчик команды /add
-@dp.message_handler(commands=["add"])
-async def cmd_add(message: types.Message):
-    await message.answer("Введите слово и его определение в формате 'слово - определение'")
-
-
-# Обработчик текстового сообщения для добавления слова
-@dp.message_handler(lambda message: message.text and "-" in message.text)
-async def add_word_handler(message: types.Message):
-    word, definition = message.text.split("-", 1)
-    word = word.strip()
-    definition = definition.strip()
-
-    await add_word(word, definition)
-    await message.answer(f"Слово '{word}' успешно добавлено в словарь.")
-
-
-# Обработчик команды /find
-@dp.message_handler(commands=["find"])
-async def cmd_find(message: types.Message):
-    await message.answer("Введите слово, определение которого вы хотите найти")
-
-
-# Обработчик текстового сообщения для поиска слова
-@dp.message_handler()
-async def find_word_handler(message: types.Message):
-    word = message.text.strip()
-    definition = await find_word(word)
-    if definition:
-        await message.answer(f"Определение слова '{word}': {definition}")
-    else:
-        await message.answer(f"Слово '{word}' не найдено в словаре.")
-
-
-# Обработчик команды /all
-@dp.message_handler(commands=["all"])
-async def cmd_all(message: types.Message):
-    all_words = await get_all_words()
-    if all_words:
-        await message.answer("\n".join(all_words))
-    else:
-        await message.answer("Словарь пуст.")
-
-
-# Обработчик команды /delete
-@dp.message_handler(commands=["delete"])
-async def cmd_delete(message: types.Message):
-    await message.answer("Введите слово, которое нужно удалить из словаря.")
-
-
-# Обработчик текстового сообщения для удаления слова
-@dp.message_handler(lambda message: message.text)
-async def delete_word_handler(message: types.Message):
-    word = message.text.strip()
-    if not word:
-        await message.answer("Введите корректное слово.")
-        return
-
-    success = await delete_word(word)
-    if success:
-        await message.answer(f"Слово '{word}' успешно удалено из словаря.")
-    else:
-        await message.answer(f"Слово '{word}' не найдено в словаре.")
-
-
-# Обработчик ошибок
-@dp.errors_handler()
-async def errors_handler(update: types.Update, exception: Exception):
-    logging.exception(exception)
-    await update.message.answer("Произошла ошибка. Попробуйте еще раз.")
-
-
-if __name__ == '__main__':
-    executor.start_polling(dp, skip_updates=True)
+bot.infinity_polling(interval=0, timeout=5 * 60)
